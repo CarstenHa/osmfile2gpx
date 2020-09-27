@@ -1,2 +1,2 @@
-# osmfile2gpx
+# osmxml2gpx
 Create a .gpx-file from an .osm-file.
