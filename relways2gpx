@@ -1,0 +1,212 @@
+#!/bin/bash
+
+# License: GNU Lesser General Public License v3.0
+# See: http://www.gnu.org/licenses/lgpl-3.0.html
+# Written by Carsten Jacob
+# Please feel free to contact me coding@langstreckentouren.de
+# https://github.com/CarstenHa
+
+usage() {
+cat <<EOU
+
+SYNOPSIS Beispiele:
+
+	$0 [options]
+	$0 [RelationID]
+	$0 [RelationID] [path/to/file.osm]
+
+$(basename $0) erstellt einen GPX-Track aus OSM-Daten. Wenn der Pfad zu einer lokal gespeicherten .osm-Datei im zweiten Argument mitgegeben wird, wird der GPX-Track aus der lokalen .osm-Datei erstellt.
+Ansonsten werden die Daten von overpass-api.de geholt, eine .osm-Datei erstellt, und dann der GPX-Track erstellt.
+Das besondere an diesem Skript ist die Überprüfung, ob die verschiedenen Wege verknüpft werden können, um später eine GPX-Datei mit möglichst wenig Track-Segmenten zu erhalten.
+Falls die Relation vollkommen unsortiert ist, muss diese zunächst mit JOSM sortiert werden.
+
+Folgende Optionen stehen zur Verfügung:
+ 
+Options:
+
+   -h		
+
+	ruft diese Hilfe auf
+
+EOU
+}
+
+# Überprüfung, ob eine Option angegeben wurde.
+if [ $# == "0" ]; then
+ echo "Es wird mindestens eine Option oder ein Argument in Form einer RelationID benötigt!"
+ usage
+ exit 1
+fi
+
+while getopts h opt
+
+do 
+ case $opt in
+
+  h) usage
+     exit 0
+  ;;
+
+ esac
+done
+
+if [ -z "$2" ]; then
+ if [ -e ./"${1}.osm" ]; then
+  while true
+    do
+      read -p "Die Datei ${1}.osm existiert bereits. Soll überschrieben werden (j/n)? " answer
+      case "$answer" in
+        j|J|"") echo "Neue Daten werden von overpass-api.de heruntergeladen."
+             wget -O ./"${1}.osm" "http://overpass-api.de/api/interpreter?data=(relation(${1});>>;);out meta;"
+            break
+            ;;
+        n|N) echo "Ok. Es wird die alte Datei ${1}.osm verarbeitet."
+            break
+            ;;
+        *) echo "Ungültige Eingabe."
+            ;;
+      esac
+    done
+ else
+  echo "Daten werden von overpass-api.de heruntergeladen."
+  wget -O ./"${1}.osm" "http://overpass-api.de/api/interpreter?data=(relation(${1});>>;);out meta;"
+ fi
+ # Neue Datei wird auf $2 gesetzt.
+ set -- "$1" "./${1}.osm"
+fi
+
+# Es wird überprüft, ob die Relation tatsächlich in .osm-Datei vorhanden ist.
+if [ -z "$(grep -o '<relation id=['\''\"]'"${1}"'['\''\"]' "$2")" ]; then
+  echo "RelationID ${1} nicht in Datei ${2} gefunden."
+  exit 1
+fi
+
+relbereich="$(sed -n '/<relation id=['\''\"]'"$1"'['\''\"]/,/<\/relation>/p' "$2")"
+wayidlist="$(echo "$relbereich" | grep 'type=['\''\"]way['\''\"]' | sed 's/.*ref=['\''\"]\([[:digit:]]*\)['\''\"].*/\1/')"
+
+# Wenn name-Tag in Relation vohanden ist, wird dieser als Dateiname verwendet, ansonsten RelationID.
+if [ "$(echo "$relbereich" | egrep -o '<tag k=['\''\"]name['\''\"]' | wc -l)" -gt "0" ]; then
+ relname="$(echo "$relbereich" | egrep '<tag k=['\''\"]name['\''\"] v=' | sed 's/<tag k=['\''\"]name['\''\"] v=['\''\"]\(.*\)['\''\"].*/\1/' | sed 's/^[ \t]*//;s/&#34;/\"/g;s/&#38;/&/g;s/&#39;/'\''/g;s/&#60;/</g;s/&#62;/>/g;s/ /_/g')"
+else
+ relname="$1"
+fi
+
+if [ -e ./"${relname}.gpx" ]; then
+
+ echo "Es existiert bereits die Datei ${relname}.gpx."
+
+ while true
+   do
+    read -p "Soll die Datei [u]eberschrieben werden oder soll ein [B]ackup der alten Datei erstellt werden? " whattodo
+     case "$whattodo" in
+       u|U) echo "OK. Datei wird überschrieben."
+           break
+           ;;
+       b|B) echo "Backup wird erstellt ..."
+            datenow=`date +%Y%m%d%H%M%S`
+            mv -v ./"${relname}.gpx" ./"${datenow}_${relname}.gpx"
+           break
+           ;;
+       *) echo "Fehlerhafte Eingabe!"
+           ;;
+     esac
+ done
+
+fi
+
+echo "Datei ${relname}.gpx wird erstellt ..."
+
+echo "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" >./"$relname".gpx
+echo "<gpx" >>./"$relname".gpx
+echo "version=\"1.0\"" >>./"$relname".gpx
+echo "creator=\"$(basename $0)\"" >>./"$relname".gpx
+echo "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"" >>./"$relname".gpx
+echo "xmlns=\"http://www.topografix.com/GPX/1/0\"" >>./"$relname".gpx
+echo "xsi:schemaLocation=\"http://www.topografix.com/GPX/1/0 http://www.topografix.com/GPX/1/0/gpx.xsd\">" >>./"$relname".gpx
+# Zeile mit bounds noch einfügen?
+
+anzwayids="$(echo "$wayidlist" | wc -l)"
+thecounter="0"
+for ways in $(seq 1 $anzwayids); do
+
+ # \r (Zeilenrücklauf) ermöglicht die Ausgabe in einer Zeile.
+ printf "Weg %d/%d wird verarbeitet ...\r" "$ways" "$anzwayids"
+
+ wayid="$(echo "$wayidlist" | sed -n ''$ways'p')"
+ nextwayid="$(echo "$wayidlist" | sed -n ''$((${ways}+1))'p')"
+
+ # Es wird überprüft, ob der Weg tatsächlich in .osm-Datei vorhanden ist.
+ if [ -n "$(grep -o '<way id=['\''\"]'"$wayid"'['\''\"]' "$2")" ]; then
+
+  # Alle Variablen, die mit next... anfangen, sind für Überprüfung 2 relevant.
+  waybereich="$(sed -n '/<way id=['\''\"]'"$wayid"'['\''\"]/,/<\/way>/p' "$2")"
+  nextwaybereich="$(sed -n '/<way id=['\''\"]'"$nextwayid"'['\''\"]/,/<\/way>/p' "$2")"
+  nodeidlist="$(echo "$waybereich" | grep '<nd ' | sed 's/.*ref=['\''\"]\([[:digit:]]*\)['\''\"].*/\1/')"
+  nextnodeidlist="$(echo "$nextwaybereich" | grep '<nd ' | sed 's/.*ref=['\''\"]\([[:digit:]]*\)['\''\"].*/\1/')"
+
+  firstnodeinway="$(echo "$nodeidlist" | sed -n '1p')"
+  nextfirstnodeinway="$(echo "$nextnodeidlist" | sed -n '1p')"
+  nextlastnodeinway="$(echo "$nextnodeidlist" | sed -n '$p')"
+
+  # ***** Tracksegment-Verzweigung *****
+  # Es fehlt noch die Überprüfung des ersten, richtigen Weges (inkl. Folgewege)
+  # vom Anfang bis Ende (evtl. mit Bounding-Box?)!
+
+  # Überprüfung 1: Check, ob der alte, letzte Wegpunkt mit dem aktuellen letzten Weg zusammen passt.
+  # Dann wird die nodeidlist mit tac umgekehrt.
+  if [ "$lastnodeinway" == "$(echo "$nodeidlist" | sed -n '$p')" ]; then
+   nodeidlist="$(echo "$nodeidlist" | tac)"
+
+  # Überprüfung 2: Check, ob der erste oder letzte Wegpunkt des NÄCHSTEN Weges 
+  # mit dem ERSTEN Wegpunkt des aktuellen Weges zusammenpasst. Dann wird die aktuell bearbeitete
+  # Wegepunktliste umgekehrt.
+  elif [ "$firstnodeinway" == "$nextfirstnodeinway" -o "$firstnodeinway" == "$nextlastnodeinway" ]; then
+   nodeidlist="$(echo "$nodeidlist" | tac)"
+   if [ "$thecounter" -gt "0" ]; then
+    echo "</trkseg>" >>./"$relname".gpx
+    echo "</trk>" >>./"$relname".gpx
+   fi
+   echo "<trk>" >>./"$relname".gpx
+   let thecounter++
+   echo "Track-Segment ${thecounter} wird erstellt ..."
+   echo "<name>${relname}_$(printf %.3d $thecounter)</name>" >>./"$relname".gpx
+   echo "<trkseg>" >>./"$relname".gpx
+
+  # Überprüfung 3: Check, wenn der aktuell bearbeitete Weg (erster Wegpunkt) 
+  # nicht mit dem davor bearbeiteten Weg (letzter Wegpunkt) verbunden ist, dann starte neues Tracksegment.
+  # (Deswegen steht die Variable lastnodeinway auch hinter dieser Verzweigung.)
+  elif [ "$lastnodeinway" != "$firstnodeinway" ]; then
+   if [ "$thecounter" -gt "0" ]; then
+    echo "</trkseg>" >>./"$relname".gpx
+    echo "</trk>" >>./"$relname".gpx
+   fi
+   echo "<trk>" >>./"$relname".gpx
+   let thecounter++
+   echo "Track-Segment ${thecounter} wird erstellt ..."
+   echo "<name>${relname}_$(printf %.3d $thecounter)</name>" >>./"$relname".gpx
+   echo "<trkseg>" >>./"$relname".gpx
+  fi
+  lastnodeinway="$(echo "$nodeidlist" | sed -n '$p')"
+  #oldlastnodeinway="$lastnodeinway"
+
+  # Lon/Lat wird aus den Nodes ermittelt.
+  anznodeids="$(echo "$nodeidlist" | wc -l)"
+  for nodes in $(seq 1 $anznodeids); do
+   nodeid="$(echo "$nodeidlist" | sed -n ''$nodes'p')"
+   nodeline="$(sed -n '/<node id=['\''\"]'"$nodeid"'['\''\"]/p' "$2")"
+   nodelat="$(echo "$nodeline" | sed 's/.*lat=['\''\"]\(-*[[:digit:]]*\.[[:digit:]]*\)['\''\"].*/\1/')"
+   nodelon="$(echo "$nodeline" | sed 's/.*lon=['\''\"]\(-*[[:digit:]]*\.[[:digit:]]*\)['\''\"].*/\1/')"
+   echo "<trkpt lat='${nodelat}' lon='${nodelon}'/>" >>./"$relname".gpx
+  done
+
+ fi
+
+done
+
+echo "</trkseg>" >>./"$relname".gpx
+echo "</trk>" >>./"$relname".gpx
+echo "</gpx>" >>./"$relname".gpx
+
+echo ""
+echo "GPX-Datei ${relname}.gpx ist fertig."
+echo ""

@@ -1,0 +1,303 @@
+#!/bin/bash
+
+# License: GNU Lesser General Public License v3.0
+# See: http://www.gnu.org/licenses/lgpl-3.0.html
+# Written by Carsten Jacob
+# Please feel free to contact me coding@langstreckentouren.de
+# https://github.com/CarstenHa
+
+usage() {
+cat <<EOU
+
+Mit diesem Skript können Höhendaten zu einer, mit relways2gpx erstellten, GPX-Datei hinzugefügt werden. Als Höhendaten-Dateien können GeoTIFFs und .hgt-Dateien genutzt werden.
+
+SYNOPSIS:
+
+  $0 [-Option] [path_to_elevation_data] [elevationfilename_extension] [name_of_gpxfile(s)]
+
+Beispiele:
+
+  $0 path/to/data/ tif ./\*.gpx
+  $0 path/to/data/ tif ./name.gpx
+  $0 path/to/data/ hgt ./\*.gpx
+  $0 path/to/data/ hgt ./name.gpx
+
+Optionen:
+
+  -s (simplify) GPX-Dateien werden zusätzlich ausgedünnt.
+
+Falls mehrere GPX-Dateien verarbeitet werden sollen, müssen die Wildcards gequotet werden (ähnlich dem Befehl find). Also zum Beispiel \*.gpx
+
+EOU
+}
+
+while getopts hs opt
+
+do 
+ case $opt in
+
+  h) usage
+     exit 0
+  ;;
+
+  s) # Überprüfungen, ob Programme gpxinfo und gpsbabel installiert sind.
+     if [ -z "$(type -p gpxinfo)" ]; then
+      echo "Das Programm gpxinfo ist nicht installiert. Um den vollen Funktionsumfang nutzen zu können, muss das Programm installiert werden (sudo apt-get install gpxinfo)."
+      exit 1
+     fi
+     if [ -z "$(type -p gpsbabel)" ]; then
+      echo "Das Programm gpsbabel ist nicht installiert. Um den vollen Funktionsumfang nutzen zu können, muss das Programm installiert werden (sudo apt-get install gpsbabel)."
+      exit 1
+     fi
+
+     simplifygpx="yes"
+
+     # Argumente werden geshiftet.
+     while [ ! "$2" == "tif" -o ! "$2" == "hgt" ]; do
+      shift
+      if [ "$2" == "tif" -o "$2" == "hgt" ]; then
+       break
+      fi
+     done
+  ;;
+
+ esac
+done
+
+if [ -z "$(type -p gdallocationinfo)" ]; then
+ echo "Das Programm gdallocationinfo ist nicht installiert. Es kann aber über das Paket gdal-bin (sudo apt-get install gdal-bin) installiert werden."
+ exit 1
+fi
+# Hier wird ein fehlendes / am Zeilenende eingefügt. 
+if [ "$(echo "$1" | sed -n '/\/$/p' | wc -l)" == "0" ]; then
+ set -- "$(echo "$1" | sed 's/$/\//')" "$2" "$3"
+fi
+if [ ! -d "$1" ]; then
+ echo "Verzeichnis der Höhendaten existiert nicht."
+ exit 1
+fi
+if [ "$2" == "tif" -o "$2" == "hgt" ]; then
+ echo "Überprüfung der Dateinamenserweiterung für Höhendateien beendet."
+else
+ echo "Ungültige Dateinamenserweiterung."
+ exit 1
+fi
+
+lenghoftrip() {
+ # *** Rechenformel Auf 10 km Tracklänge 55 Trackpunkte ***
+ berechnung=$((55*"$triplength"/10))
+}
+
+filearray=("$(echo "$3")")
+
+for datei in ${filearray[@]}; do
+
+ echo ""
+ echo "*** Datei ${datei} wird verarbeitet ... ***" 
+ filesuffix="${datei##*.}"
+ gpxcontent="$(cat "$datei")"
+ anzgpxlines="$(cat "$datei" | wc -l)"
+ gpxname="$(basename --suffix=.gpx "$datei")"
+ gpxfilepath="$(dirname ${datei})"
+
+ if [ -e "$datei" -a "$filesuffix" == "gpx" ]; then
+ if [ "$(cat "$datei" | grep '</ele>' | wc -l)" == "0" ]; then
+ if [ "$(cat "$datei" | grep '</trkpt>' | wc -l)" == "0" ]; then
+
+   # ***** GPX-Datei wird ausgedünnt (Option -s) *****
+   if [ "$simplifygpx" == "yes" ]; then
+
+    if [ -e "${datei}.bak" ]; then
+     echo "Es existiert bereits eine Sicherungs-Datei Namens ${datei}.bak. Skript wird abgebrochen!"
+     exit 1
+    fi
+
+    # Sicherungskopie vom Original wird erstellt.
+    cp "$datei" "${datei}.bak"
+
+    echo "Daten werden auf Ausdünnung geprüft ..."
+
+    # Verarbeitung bei EINEM gefundenen Track in GPX-Datei.
+    if [ "$(grep '<trk>' "$datei" | wc -l)" == "1" ]; then
+
+      triplength="$(gpxinfo "$datei" | sed -n 1,12p | grep 'Length 3D' | sed 's/.*Length 3D: \(.*\)\..*/\1/')"
+   
+      # Tracks von unter einem Kilometer Länge werden vernachlässigt.
+      if [ ! "$triplength" == "0" ]; then
+       lenghoftrip
+       trackpoints="$(echo "$gpxcontent" | grep '<trkpt' | wc -l)"
+       echo "Reduzieren der Trackpunkte: Bei einer Länge von ${triplength} km wird von ${trackpoints} Punkte auf ${berechnung} Punkte vereinfacht."
+       gpsbabel -i gpx -f "$datei" -x simplify,count="$berechnung" -o gpx -F "$datei"
+      fi
+
+     # Verarbeitung bei mehreren gefundenen Tracks in GPX-Datei.
+     else
+
+      unset allgpxcontent
+      unset trackcontentafter
+
+      gpxkopf="$(sed -n '1,/<trk>/p' "$datei" | sed '$d')"
+      anztracks="$(grep '<trk>' "$datei" | wc -l)"
+      echo "${anztracks} Tracks in Datei gefunden. Datei wird gesplittet ..."
+
+      # Gesplittete GPX-Datei werden zu einzelnen GPX-Dateien zusammengesetzt.
+      for track in $(seq 1 "$anztracks"); do
+
+       if [ -e ./"gpxsection_${track}_tmp.gpx" ]; then
+        read -p "Es existiert bereits eine Datei Namens gpxsection_${track}_tmp.gpx. Datei wird überschrieben! Weiter mit [Enter]. Abbruch mit [STRG]+[C]."
+       fi
+
+       # Auswertung richtet sich an den erstellten Dateien von relways2gpx.
+       # Einzelne Tracks haben z.B. folgendes <name>-Element: <name>RelationID/Name_001</name> usw.
+       trackcontent="$(sed -n '/<name>.*_'$(printf %.3d "$track")'/,/<\/trk>/p' "$datei")"
+       echo "$gpxkopf" >./gpxsection_"$track"_tmp.gpx
+       echo "<trk>" >>./gpxsection_"$track"_tmp.gpx
+       echo "$trackcontent" >>./gpxsection_"$track"_tmp.gpx
+       echo "</gpx>" >>./gpxsection_"$track"_tmp.gpx
+
+       triplength="$(gpxinfo ./gpxsection_"$track"_tmp.gpx | sed -n 1,12p | grep 'Length 3D' | sed 's/.*Length 3D: \(.*\)\..*/\1/')"
+
+       # Tracks von unter einem Kilometer Länge werden vernachlässigt.
+       if [ ! "$triplength" == "0" ]; then
+        lenghoftrip
+        trackpoints="$(echo "$trackcontent" | grep '<trkpt' | wc -l)"
+        echo "Reduzieren der Trackpunkte von Track ${track}: Bei einer Länge von ${triplength} km wird von ${trackpoints} Punkte auf ${berechnung} Punkte vereinfacht."
+        gpsbabel -i gpx -f ./gpxsection_"$track"_tmp.gpx -x simplify,count="$berechnung" -o gpx -F ./gpxsection_"$track"_tmp.gpx
+       fi
+
+       # Der neue, bearbeitete Inhalt wird extrahiert und zunächst in einer Variable abgelegt.
+       trackcontentafter="$(sed -n '/<name>.*_'$(printf %.3d "$track")'/,/<\/trk>/p' ./gpxsection_"$track"_tmp.gpx)"
+       allgpxcontent="$(echo "$allgpxcontent"; echo "  <trk>"; echo "$trackcontentafter")"
+
+       # Aufräumen
+       rm -f ./gpxsection_*_tmp.gpx
+
+      done
+
+      # Neue Datei wird zusammengesetzt.
+      echo "$gpxkopf" >"$datei"
+      echo "$allgpxcontent">>"$datei"
+      echo "</gpx>" >>"$datei"
+      sed -i '/^$/d' "$datei"
+
+    fi
+
+   # Ende der ersten Verzweigung "$simplifygpx" == "yes" (Option -s)
+   fi
+
+ # ***** Höhendaten werden eingefügt *****
+
+  # Inhalt wird neu eingelesen. Wichtig wenn Option -s genutzt wird.
+  anzgpxlines="$(cat "$datei" | wc -l)"
+  gpxcontent="$(cat "$datei")"
+  echo "Höhendaten werden eingefügt ..."
+
+  for singleline in $(seq 1 "$anzgpxlines"); do
+
+   # \r (Zeilenrücklauf) ermöglicht die Ausgabe in einer Zeile. Mit 'tput clear' könnte man auch den Bildschirm löschen.
+   printf "Work on line: %d/%d\r" "$singleline" "$anzgpxlines"
+
+   gpxline="$(echo "$gpxcontent" | sed -n ''$singleline'p')"
+
+   if [ -n "$(echo "$gpxline" | grep ' lon=')" ]; then
+
+    # Geokoordinaten in dezimaler Form werden ermittelt.
+    lat="$(echo "$gpxline" | sed 's/^.*lat=.\(-*[[:digit:]]*\.[[:digit:]]*\).*$/\1/')"
+    lon="$(echo "$gpxline" | sed 's/^.*lon=.\(-*[[:digit:]]*\.[[:digit:]]*\).*$/\1/')"
+    # Grad (Stellen vor Punkt) werden für Höhendateien angepasst.
+    # Format ist z.B: N45E017.hgt (bzw. .tif)
+
+    latbefore="$(printf %.2d "${lat%.*}")"
+    lonbefore="$(printf %.3d "${lon%.*}")"
+
+    if [ ! "$latbefore" == "$oldlatbefore" ]; then
+     if [ -n "$(echo "$latbefore" | grep '-')" ]; then
+      latbefore="$(echo "$latbefore" | sed 's/-//')"
+      # Hier werden für die Berechnung ggf. die Nullen am Anfang entfernt.
+      # Ist wichtig, da z.B. $((011 + 1)) nicht das gleiche Ergebnis wie $((11 + 1)) ist.
+      if [ "$(echo "$latbefore" | sed -n '/^0/p' | wc -l)" -gt "0" ]; then
+       latbefore="$(($(echo "$latbefore" | sed 's/^0*//') + 1))"
+      else
+       latbefore="$(($latbefore + 1))"
+      fi
+      latbefore="$(printf %.2d $latbefore)"
+      northsouthdirection="S"
+     else
+      northsouthdirection="N"
+     fi
+    fi
+
+    if [ ! "$lonbefore" == "$oldlonbefore" ]; then
+     if [ -n "$(echo "$lonbefore" | grep '-')" ]; then
+      lonbefore="$(echo "$lonbefore" | sed 's/-//')"
+      # Hier werden für die Berechnung ggf. die Nullen am Anfang entfernt.
+      # Ist wichtig, da z.B. $((011 + 1)) nicht das gleiche Ergebnis wie $((11 + 1)) ist.
+      if [ "$(echo "$lonbefore" | sed -n '/^0/p' | wc -l)" -gt "0" ]; then
+       lonbefore="$(($(echo "$lonbefore" | sed 's/^0*//') + 1))"
+      else
+       lonbefore="$(($lonbefore + 1))"
+      fi
+      lonbefore="$(printf %.3d $lonbefore)"
+      eastwestdirection="W"
+     else
+      eastwestdirection="E"
+     fi
+    fi
+
+    # Hier wird die Höhe mit dem Programm gdallocationinfo ermittelt.
+    # Man könnte noch Ausgabe einbauen, wenn eine Höhendatei nicht existiert.
+    height="$(gdallocationinfo ${1}${northsouthdirection}${latbefore}${eastwestdirection}${lonbefore}.${2} -wgs84 ${lon} ${lat} | grep 'Value:' | sed 's/.*Value: \(.*\)/\1/')"
+    gpxcontent="$(echo "$gpxcontent" | sed ''$singleline's/\/>$/><ele>'$height'<\/ele><\/trkpt>/')"
+
+    # Hier werden die "alten" Koordinaten (Grad) in Variable geschrieben und beim nächsten Durchlauf mit den aktuellen verglichen und ggf. dann bearbeitet.
+    oldlatbefore="$latbefore"
+    oldlonbefore="$lonbefore"
+
+   fi
+
+  done
+
+  if [ "$simplifygpx" == "yes" -a ! -z "$(diff ${datei} ${datei}.bak)" ]; then
+   mv -i "$datei" "${datei%.gpx}_simplified.gpx" && mv -i "${datei}.bak" "${datei}"
+  else 
+   rm "${datei}.bak"
+  fi
+
+  if [ -e ./"${datei%.gpx}_hgt.gpx" ]; then
+
+   echo "Es existiert bereits eine Datei Namens $(basename ${datei%.gpx}_hgt.gpx)."
+
+   while true
+     do
+      read -p "Soll die Datei [u]eberschrieben werden oder soll ein [B]ackup der alten Datei erstellt werden? " whattodo
+       case "$whattodo" in
+         u|U) echo "OK. Datei wird überschrieben."
+             break
+             ;;
+         b|B) echo "Backup wird erstellt ..."
+              datenow=`date +%Y%m%d%H%M%S`
+              mv -v "$gpxfilepath"/$(basename "${datei%.gpx}_hgt.gpx") "$gpxfilepath"/${datenow}_$(basename "${datei%.gpx}_hgt.gpx")
+             break
+             ;;
+         *) echo "Fehlerhafte Eingabe!"
+             ;;
+       esac
+   done
+
+  fi
+
+  echo "$gpxcontent" >./"${datei%.gpx}_hgt.gpx"
+  echo -e "\nNeue Datei ${gpxname}_hgt.gpx fertig." 
+
+ # Ende der Verzweigung: Überprüfung auf Schlusstag </trkpt>
+ else echo "Es wurden Elemente mit dem Schlusstag </trkpt> gefunden. Eine GPX-Datei mit diesem Format wird zur Zeit noch nicht unterstützt."
+ fi
+ # Ende der Verzweigung: Überprüfung auf Schlusstag </ele>
+ else echo "Es wurden Elemente mit dem Schlusstag </ele> gefunden. Eine GPX-Datei mit diesem Format wird zur Zeit noch nicht unterstützt."
+ fi
+ # Ende der Verzweigung: .gpx-Dateiendung-Überprüfung
+ else echo "Datei ${datei} ist keine GPX-Datei."
+ fi
+
+done
+echo ""
