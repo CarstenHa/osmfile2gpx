@@ -86,7 +86,7 @@ wayidlist="$(echo "$relbereich" | grep 'type=['\''\"]way['\''\"]' | sed 's/.*ref
 
 # Wenn name-Tag in Relation vohanden ist, wird dieser als Dateiname verwendet, ansonsten RelationID.
 if [ "$(echo "$relbereich" | egrep -o '<tag k=['\''\"]name['\''\"]' | wc -l)" -gt "0" ]; then
- relname="$(echo "$relbereich" | egrep '<tag k=['\''\"]name['\''\"] v=' | sed 's/<tag k=['\''\"]name['\''\"] v=['\''\"]\(.*\)['\''\"].*/\1/' | sed 's/^[ \t]*//;s/&#34;/\"/g;s/&#38;/&/g;s/&#39;/'\''/g;s/&#60;/</g;s/&#62;/>/g;s/ /_/g')"
+ relname="$(echo "$relbereich" | egrep '<tag k=['\''\"]name['\''\"] v=' | sed 's/<tag k=['\''\"]name['\''\"] v=['\''\"]\(.*\)['\''\"].*/\1/' | sed 's/^[ \t]*//;s/&#34;/\"/g;s/&#38;/&/g;s/&#39;/'\''/g;s/&#60;/</g;s/&#62;/>/g;s/ /_/g;s/\//_/g')"
 else
  relname="$1"
 fi
