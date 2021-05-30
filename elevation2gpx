@@ -84,8 +84,8 @@ else
 fi
 
 lenghoftrip() {
- # *** Rechenformel Auf 10 km Tracklänge 55 Trackpunkte ***
- berechnung=$((55*"$triplength"/10))
+ # *** Rechenformel Auf 10 km Tracklänge 130 Trackpunkte ***
+ berechnung=$((130*"$triplength"/10))
 }
 
 filearray=("$(echo "$3")")
